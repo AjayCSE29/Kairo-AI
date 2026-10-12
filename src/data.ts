@@ -1,0 +1,34 @@
+export type ResearchMode = 'Quick answer' | 'Research' | 'Deep research';
+export type ModelId = 'obsidian' | 'opal' | 'jade' | 'garnet' | 'topaz' | 'aventurine';
+export type Model = { id: ModelId; name: string; role: string; description: string; multiplier: number; tone: string; speed: string; depth: string; harness: string[] };
+export const MODELS: Model[] = [
+  { id: 'obsidian', name: 'Kairo Obsidian', role: 'Flagship deep reasoning', description: 'Complex research, synthesis, and difficult analytical questions.', multiplier: 3, tone: 'silver', speed: 'Deliberate', depth: 'Extensive', harness: ['Adaptive reasoning', 'Multi-stage planning', 'Contradiction analysis', 'Optional JEV verification'] },
+  { id: 'opal', name: 'Kairo Opal', role: 'Fast and efficient', description: 'Quick answers, short explanations, and lightweight reasoning.', multiplier: .65, tone: 'pearl', speed: 'Fast', depth: 'Focused', harness: ['Minimal orchestration', 'Limited retrieval', 'Concise outputs'] },
+  { id: 'jade', name: 'Kairo Jade', role: 'Research and discovery', description: 'Query expansion, source discovery, and evidence collection.', multiplier: 1.5, tone: 'jade', speed: 'Balanced', depth: 'Broad retrieval', harness: ['Search planning', 'Source diversity', 'Evidence extraction'] },
+  { id: 'garnet', name: 'Kairo Garnet', role: 'Critical analysis', description: 'Claim decomposition, counterarguments, and evidence challenges.', multiplier: 1.8, tone: 'garnet', speed: 'Measured', depth: 'Critical', harness: ['Checkable claims', 'Counter-evidence', 'Uncertainty reporting'] },
+  { id: 'topaz', name: 'Kairo Topaz', role: 'Complex problem-solving', description: 'Multi-step logic, technical investigations, and structured analysis.', multiplier: 2.1, tone: 'topaz', speed: 'Measured', depth: 'Structured', harness: ['Task decomposition', 'Dependency tracking', 'Intermediate checks'] },
+  { id: 'aventurine', name: 'Kairo Aventurine', role: 'Experimental exploration', description: 'Alternative hypotheses and open-ended connections.', multiplier: 1.25, tone: 'aventurine', speed: 'Balanced', depth: 'Exploratory', harness: ['Alternative hypotheses', 'Relationship discovery', 'Labeled speculation'] },
+];
+export type Source = { id: string; title: string; domain: string; kind: string; date: string; excerpt: string; relevance: number; relationship: string };
+export type Claim = { id: string; text: string; status: 'Supported' | 'Insufficient evidence' | 'Contradicted' | 'Not checked'; sourceIds: string[]; detail: string };
+export const SOURCES: Source[] = [
+ { id:'S1', title:'On the Opportunities and Risks of Foundation Models', domain:'arxiv.org', kind:'Research paper', date:'2021', excerpt:'Foundation models can offer substantial capabilities, while also creating risks that require careful evaluation across their lifecycle.', relevance:94, relationship:'Supports C1' },
+ { id:'S2', title:'Emergent Abilities of Large Language Models', domain:'arxiv.org', kind:'Research paper', date:'2022', excerpt:'Some capabilities appear to improve sharply with scale under particular evaluation settings; measurement choices affect the observed pattern.', relevance:87, relationship:'Supports C2' },
+ { id:'S3', title:'Are Emergent Abilities of Large Language Models a Mirage?', domain:'arxiv.org', kind:'Research paper', date:'2023', excerpt:'The apparent emergence of abilities can depend on the metric used, and may be explained by smoother underlying changes.', relevance:82, relationship:'Challenges C2' },
+ { id:'S4', title:'Language Models are Few-Shot Learners', domain:'arxiv.org', kind:'Research paper', date:'2020', excerpt:'The study reports a range of language model behaviors under few-shot prompting, with limitations across task types.', relevance:79, relationship:'Supports C1' },
+ { id:'S5', title:'A Survey of Large Language Models', domain:'arxiv.org', kind:'Survey', date:'2023', excerpt:'Evaluation across benchmarks provides useful comparisons but does not capture all real-world behavior or deployment contexts.', relevance:73, relationship:'Context for C3' },
+];
+export const CLAIMS: Claim[] = [
+ { id:'C1', text:'Scaling language models can improve performance across a range of tasks.', status:'Supported', sourceIds:['S1','S4'], detail:'Available research reports broad gains with scale, while emphasizing that outcomes vary by task, training data, and evaluation setup.' },
+ { id:'C2', text:'Some capabilities appear suddenly once models pass a particular scale threshold.', status:'Contradicted', sourceIds:['S2','S3'], detail:'The literature is contested. Some results show sharp transitions under specific metrics, while alternative analyses find smoother underlying improvement.' },
+ { id:'C3', text:'Benchmark performance alone fully predicts real-world reliability.', status:'Insufficient evidence', sourceIds:['S5'], detail:'The available sources do not establish that benchmark scores fully predict behavior in deployed contexts.' },
+];
+export type Session = { id: string; title: string; query: string; modelId: ModelId; mode: ResearchMode; date: string; cost: number; saved: boolean; completed: boolean; verified: boolean };
+export const ESTIMATE = (modelId: ModelId, mode: ResearchMode, verify: boolean) => Math.ceil((mode === 'Quick answer' ? 4 : mode === 'Research' ? 11 : 20) * (MODELS.find(m => m.id === modelId)?.multiplier ?? 1) + (verify ? 3 : 0));
+export const DEMO_QUERY = 'Can small language models reason reliably?';
+export function readSessions(): Session[] { try { const raw = localStorage.getItem('kairo.sessions'); return raw ? JSON.parse(raw) as Session[] : [{ id:'demo-1', title:DEMO_QUERY, query:DEMO_QUERY, modelId:'obsidian', mode:'Research', date:'Today', cost:36, saved:true, completed:true, verified:true }, { id:'demo-2', title:'The future of open-source silicon', query:'What are the tradeoffs in open-source silicon?', modelId:'jade', mode:'Deep research', date:'Yesterday', cost:38, saved:false, completed:true, verified:true }]; } catch { return []; } }
+export function writeSessions(items: Session[]) { try { localStorage.setItem('kairo.sessions', JSON.stringify(items)); } catch { /* storage may be unavailable */ } }
+export type Preferences = { modelId: ModelId; mode: ResearchMode; verify: boolean; reducedMotion: boolean };
+export const DEFAULT_PREFERENCES: Preferences = { modelId:'obsidian', mode:'Research', verify:true, reducedMotion:false };
+export function readPreferences(): Preferences { try { const raw = localStorage.getItem('kairo.preferences'); return raw ? { ...DEFAULT_PREFERENCES, ...JSON.parse(raw) as Partial<Preferences> } : DEFAULT_PREFERENCES; } catch { return DEFAULT_PREFERENCES; } }
+export function readCredits(): number { try { const value = Number(localStorage.getItem('kairo.credits')); return Number.isFinite(value) && value >= 0 ? value : 420; } catch { return 420; } }
