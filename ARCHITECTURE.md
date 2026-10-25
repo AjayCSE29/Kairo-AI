@@ -2,190 +2,214 @@
 
 ## 1. System overview
 
-Kairo is a single-page React application built with Vite and TypeScript. The current system is browser-only and uses bundled TypeScript fixtures plus localStorage. It has no server, API layer, model provider, search provider, database, authentication, or billing service.
+Kairo is a single-user web application with a React/Vite frontend, a Fastify/TypeScript API, SQLite persistence, and two external OpenAI-compatible model providers plus Tavily search. One process serves both the API and the built frontend in production.
 
 ```mermaid
 flowchart TD
-  Browser[Browser] --> Entry[index.html]
-  Entry --> Main[src/main.tsx]
-  Main --> Router[BrowserRouter]
-  Router --> App[src/App.tsx]
-  App --> Data[src/data.ts]
-  App --> Models[src/SettingsModels.tsx]
-  App --> Usage[src/UsagePage.tsx]
-  App --> Storage[(localStorage)]
-  App --> Fixtures[Local model, source, and claim fixtures]
-  App --> Flow[React Flow graph]
-  App --> CSS[src/styles.css]
+  Browser[React app] -->|/api + SSE| Fastify[Fastify server]
+  Fastify --> Pipeline[Research pipeline]
+  Fastify --> DB[(SQLite)]
+  Fastify --> Files[(Uploads)]
+  Pipeline --> OpenAI[OpenAI-compatible provider]
+  Pipeline --> Jarvis[JarvisLabs OpenAI-compatible provider]
+  Pipeline --> Tavily[Tavily search/extract]
+  Fastify -->|built dist| Browser
 ```
-
-The diagram shows code boundaries, not remote services. The browser is the complete runtime for this prototype.
 
 ## 2. Runtime and dependencies
 
-- **React 18** renders the application.
-- **React Router 6** selects views from the URL.
-- **Vite 6** provides development and production bundling.
-- **TypeScript 5** checks application types under strict settings.
-- **`@xyflow/react`** renders the interactive evidence graph.
-- **Lucide React** supplies icons.
-- **Vitest** is present for the small data-focused test suite.
+Frontend:
 
-The app entry point is `index.html` → `src/main.tsx`. `main.tsx` imports `src/styles.css` and React Flow's base stylesheet, mounts `<App />` in `React.StrictMode`, and wraps it in `BrowserRouter`. `vite.config.ts` enables the React plugin. There is no server-side rendering path.
+- React 18, React Router 7, Vite 6, TypeScript
+- `@xyflow/react` for the graph
+- `lucide-react` icons
+- `react-markdown` + `remark-gfm` for cited answers
 
-## 3. Route and page architecture
+Server:
 
-The route table is defined in `src/App.tsx`.
+- Fastify 5 with `@fastify/static` and `@fastify/multipart`
+- `better-sqlite3` with WAL mode and foreign keys
+- `openai` SDK using a per-provider `baseURL`
+- Tavily REST API via `fetch`
+- `unpdf` for PDF text extraction
+- `zod` for request and structured-output validation
+- `tsx` to run TypeScript directly
+- Vitest for tests
+
+`shared/models.ts` and `shared/types.ts` are imported by both sides so model IDs, modes, DTOs, and SSE events stay aligned.
+
+## 3. Route architecture
 
 | Path | View | Notes |
 | --- | --- | --- |
-| `/` | Research home | Composer, model picker, mode, estimate, simulated submission |
-| `/research/:sessionId` | Research result | Answer, Sources, Claims, Graph tabs for the selected local session |
-| `/library` | Research library | Searchable/filterable local session history |
-| `/settings` | Preferences | Research defaults, appearance, demo data, product information |
-| `/settings/models` | Model catalog | `SettingsModels` comparison and profile selection |
-| `/settings/usage` | Usage history | `UsagePage` and demo capacity actions |
-| `/graph/:sessionId` | Graph | Graph view for an existing selected session |
-| `/models` | Redirect | Replaced with `/settings/models` |
-| `/usage`, `/credits` | Redirect | Replaced with `/settings/usage` |
-| Other | Not-found view | Recovery action returns to research home |
+| `/` | Research home | Composer, real submit, attachments |
+| `/research/:sessionId` | Research result | SSE progress, answer, sources, claims, graph |
+| `/library` | Research library | Server-backed history and actions |
+| `/settings` | Preferences | Defaults, appearance, reset |
+| `/settings/models` | Model catalog | Profile-to-provider routes |
+| `/settings/usage` | Usage | Token counts and runs |
+| `/graph/:sessionId` | Graph | Standalone graph view |
+| `/share/:token` | Public share | Frozen snapshot, no workspace shell |
+| `/models`, `/usage`, `/credits` | Redirects | Settings equivalents |
+| Other | Not found | Recovery link |
 
-The top-level component owns app state and passes handlers/data to page and view components. `SettingsModels` and `UsagePage` are separate files; most other components currently live in `App.tsx`.
+`src/App.tsx` owns the shell, routes, bootstrap state, preferences, session list, and page composition. `SettingsModels.tsx` and `UsagePage.tsx` are separate settings views. `src/api.ts` is the typed client and SSE subscriber.
 
-## 4. State ownership and data flow
+## 4. Bootstrap and state flow
 
-### App-level state
+On load the frontend fetches in parallel:
 
-`App` owns the state shared across routes:
+- `GET /api/config`
+- `GET /api/preferences`
+- `GET /api/models`
+- `GET /api/sessions`
 
-- Session history and the active session ID.
-- Composer query, selected model, research mode, and verification preference.
-- Simulation busy/progress state and timer IDs.
-- Current result tab and selected source/claim drawer.
-- Toast, mobile sidebar, library search/filter, modal state, and internal demo capacity.
-- Preferences, including reduced motion.
+If no model route or Tavily key is configured, the app shows the setup screen instead of the workspace. If the stored preference points to an unavailable profile, the client selects the first available profile and persists it.
 
-The active session is derived from `sessions` and `activeId`. Route changes to `/research/:sessionId` synchronize the active ID from the URL. Navigation helpers close the mobile navigation when needed.
-
-### Research submission sequence
+Research submission:
 
 ```mermaid
 sequenceDiagram
   actor User
-  participant Home as Home composer
-  participant App as App state
-  participant Estimate as ESTIMATE()
-  participant Store as localStorage
-  participant Timer as Browser timers
-  User->>Home: Submit query
-  Home->>App: submit(query, model)
-  App->>Estimate: Calculate demo usage
-  Estimate-->>App: Relative cost number
-  App->>App: Create local Session and deduct internal capacity
-  App->>Store: Persist sessions, preferences, capacity
-  App->>Timer: Schedule simulated progress steps
-  App-->>User: Navigate to /research/:sessionId
-  Timer->>App: Advance progress and mark session complete
-  App->>Store: Persist completed session
+  participant Web as React
+  participant API as Fastify
+  participant DB as SQLite
+  participant Pipeline
+  participant Search as Tavily
+  participant Model as Model provider
+  User->>Web: Submit question
+  Web->>API: POST /api/research
+  API->>DB: Create session + run
+  API-->>Web: 202 {sessionId, runId}
+  Web->>API: GET /api/research/:id/events (SSE)
+  API->>Pipeline: Start async pipeline
+  Pipeline->>Model: Plan queries
+  Pipeline->>Search: Search + retrieve
+  Pipeline->>Model: Extract claims
+  Pipeline->>Model: Verify claims (if enabled)
+  Pipeline->>Model: Stream cited answer
+  Pipeline->>DB: Persist sources, claims, answer, usage, events
+  API-->>Web: stage/source/claim/delta/usage/done events
 ```
 
-`submit` trims the query, rejects an empty query or an already-running run, calculates a demo estimate, and handles insufficient internal capacity. It creates an incomplete local `Session`, deducts the estimate, navigates to the result route, and schedules a finite series of timeouts based on research mode. The final timeout marks the session complete. No remote operation occurs. Canceling clears timers and refunds the demo amount; the investigation remains as a draft. The callbacks and timers are held in `App` and cleared when their flows complete or cancel.
+SSE events are persisted in the `events` table. Reconnecting clients replay from `Last-Event-ID`, then receive live events. A heartbeat keeps intermediaries from closing idle streams.
 
-### Preferences
+## 5. Persistence
 
-Model, mode, and verification controls update top-level state and the `Preferences` object. The preference effect serializes to `kairo.preferences`. Reduced-motion preference controls a root class. The model picker effort slider is currently separate local UI state and does not enter this preference object.
+SQLite schema:
 
-### Local persistence
+| Table | Contents |
+| --- | --- |
+| `sessions` | Question, title, model/mode/effort, verification flag, status, answer, timestamps, parent |
+| `runs` | Provider/model route, stage, status, token totals, search count, error |
+| `stage_usage` | Prompt/completion tokens, estimate flag, duration per stage |
+| `sources` | Stable `S1…Sn` IDs, URL or upload, title, domain, kind, excerpt, content, relevance, relationship |
+| `claims` | Stable `C1…Cn` IDs, text, status, detail, source IDs, source-claim relations |
+| `events` | Run event sequence for SSE replay |
+| `graph_layout` | Per-session node positions |
+| `graph_memos` | Per-session memo text and positions |
+| `attachments` | Uploaded file metadata, disk path, extracted text |
+| `session_attachments` | Session-to-attachment links |
+| `preferences` | Single row: model, mode, verification, reduced motion, effort |
+| `shares` | Tokenized frozen snapshots |
 
-`src/data.ts` defines read helpers and defaults; `App.tsx` performs writes in effects. The storage keys are:
+The database path defaults to `data/kairo.db`; uploads default to `data/uploads`. Both are configurable through `DATA_DIR`. Writes are synchronous within the server process. At startup, runs left `queued`/`running` by a previous process are marked failed.
 
-| Key | Contents | Default/fallback |
-| --- | --- | --- |
-| `kairo.sessions` | Session array | Starter fixture sessions when absent or unreadable |
-| `kairo.preferences` | Model, mode, verification, motion preferences | `DEFAULT_PREFERENCES` |
-| `kairo.credits` | Internal demo capacity number | `readCredits` fallback |
+## 6. API surface
 
-Writes are wrapped in `try/catch` because browser storage can be unavailable. Reset removes the keys and resets React state to demo defaults. Persisted data is client-side only and has no schema migration framework; changes to stored shapes should handle old entries safely.
+Config and catalog:
 
-## 5. Data model
+- `GET /api/health`
+- `GET /api/config` — setup state and missing variable names, never secrets
+- `GET /api/models` — six profiles with provider/model/availability
 
-The central fixture and type module is `src/data.ts`.
+Research:
 
-### Model profiles
+- `POST /api/research` — create and start a run
+- `GET /api/research/:sessionId/events` — SSE with replay
+- `POST /api/research/:sessionId/cancel`
+- `POST /api/research/:sessionId/rerun`
+- `POST /api/research/:sessionId/followup`
 
-`ModelId` is a union of the six IDs: `obsidian`, `opal`, `jade`, `garnet`, `topaz`, and `aventurine`. Each `MODELS` item contains a stable ID, display name, role, description, multiplier, visual tone, speed/depth metadata, and harness tags. These fields support the picker and settings catalog. They do not connect to model APIs or measure real performance.
+Sessions and preferences:
 
-The current estimate is an arithmetic function:
+- `GET /api/sessions`, `GET /api/sessions/:id`
+- `PATCH /api/sessions/:id` (title, saved)
+- `DELETE /api/sessions/:id`
+- `GET|PUT /api/preferences`
+- `GET /api/usage`
+- `POST /api/reset`
 
-```text
-ceil(mode base × model multiplier + optional verification increment)
-```
+Graph, attachments, export, share:
 
-Mode bases are 4 for Quick answer, 11 for Research, and 20 for Deep research; verification adds 3. The result is an internal demo usage unit. Avoid naming it a real cost or provider credit charge in product copy.
+- `GET|PUT /api/sessions/:id/graph`
+- `POST /api/sessions/:id/graph/reset`
+- `POST /api/attachments`, `DELETE /api/attachments/:id`
+- `GET /api/sessions/:id/export?format=md|json`
+- `POST /api/sessions/:id/share`
+- `DELETE /api/sessions/:id/share/:token`
+- `GET /api/share/:token` (public)
 
-### Sessions
+Request validation uses Zod. Errors share a JSON shape: `{ error: { message, code } }`.
 
-A `Session` carries its ID, title, query, model ID, mode, display date, estimated demo usage, saved/completed state, and whether verification was selected. It is enough to render the local history and results; it is not a job handle or record of a remote execution.
+## 7. Research pipeline
 
-### Sources and claims
+Implementation: `server/src/research/pipeline.ts`.
 
-Five source fixtures (`S1`–`S5`) and three claim fixtures (`C1`–`C3`) provide static evidence data. Claims reference sources by ID and carry a status. Result tabs, citations, drawers, and graph edges derive from these fixtures. There is no parser, crawler, citation resolver, or verification engine behind them.
+Stage sequence:
 
-## 6. Main UI areas
+1. **Planning** — model produces JSON search queries. Invalid JSON is repaired once, then falls back to the user question.
+2. **Searching** — Tavily search per query. Results are deduplicated by URL and capped by mode.
+3. **Extracting** — Tavily content is normalized; extraction is requested for results with too little content. Attachments become sources as well.
+4. **Claims** — model returns JSON claims with source IDs and `supports`/`challenges`/`context` relations. Invalid source IDs are dropped.
+5. **Verification** — when enabled, a second model pass assigns `Supported`, `Contradicted`, or `Insufficient evidence` per claim with a short rationale.
+6. **Synthesis** — the model streams Markdown with `[S1]` citations. Invalid source markers are removed and a citation map is persisted.
+7. **Finalizing** — token totals, status, sources, claims, answer, and graph data are saved; `usage` and `done` events are emitted.
 
-### Composer and model picker
+Mode controls query count, source cap, source excerpt length, and answer source count. Effort controls answer tokens, temperature, and extra queries. Provider-reported usage is preferred; when a provider omits it, the server estimates tokens and marks the result as estimated.
 
-The home composer is implemented in `App.tsx`. It combines the auto-growing query textarea, plus attachment affordance, model selector, research mode control, and submit/cancel action. Model selection opens a local popover; it does not navigate to the model catalog. The effort slider is currently visual/local state and is not part of the estimate. The attachment affordance does not ingest files.
+Failures are persisted on the run/session and sent as an `error` event. Cancellation aborts provider requests through an `AbortController`, marks the run/session cancelled, and retains the draft session.
 
-### Research results
+## 8. Provider routing
 
-`ResearchPage` displays session metadata and tabs for Answer, Sources, Claims, and Graph. The removed Investigation panel is not part of the current page architecture. Result output is fixture-based explanatory content. Source and claim selection opens a detail drawer; citations link to source details. Saving and library operations update local session state.
+`server/src/config.ts` reads:
 
-### Settings and library
+- `OPENAI_BASE_URL`, `OPENAI_API_KEY`
+- `JARVISLABS_BASE_URL`, `JARVISLABS_API_KEY`
+- `MODEL_<PROFILE>_PROVIDER`, `MODEL_<PROFILE>_NAME`
+- optional JSON/stream-usage flags per provider
 
-`SettingsPage` switches among preferences, model catalog, and usage through its settings tabs. `SettingsModels.tsx` renders the profile comparison and calls the shared model update handler. `UsagePage.tsx` derives completed-session history from session props. `LibraryPage` operates on the app-owned sessions via callbacks.
+`OpenAiCompatibleGateway` caches one OpenAI SDK client per provider. A profile without a configured provider/key/model is exposed as unavailable and cannot be selected or used for a run. No secret is included in `/api/config` or `/api/models`.
 
-### Evidence graph
+## 9. Frontend behavior
 
-`GraphPage` builds question, claim, and source nodes from fixture data and connects them with static edges. Contradiction styling/labels are derived from claim status and the source relation. React Flow is controlled with `useNodesState(baseNodes)` and `onNodesChange`; this is required for node drag positions to update and remain stable through renders during the component lifetime.
+- `src/api.ts` centralizes fetch, uploads, JSON errors, export URLs, and EventSource subscriptions.
+- The composer uploads files immediately, shows removable chips, and sends attachment IDs with the run.
+- The result page boots from `GET /api/sessions/:id`; if the run is active it subscribes to SSE. Stage events drive the activity panel; answer deltas render as a live preview. The finished answer is rendered with ReactMarkdown and clickable citations.
+- Source and claim drawers use the run's real data. External links open in a new tab; relevance is explicitly distinguished from reliability.
+- Graph state is controlled by `useNodesState`. Positions and memos are persisted through the graph API with a short debounce. Reset restores default layout. Share graphs are read-only.
+- Settings update server preferences optimistically and reload preferences on failure.
+- Usage fetches real token totals and per-model summaries.
+- The shared page renders a frozen snapshot and has no workspace navigation or editing controls.
 
-Graph behavior includes:
+## 10. Security and reliability
 
-- Dragging nodes to arrange the canvas; pan by dragging empty canvas space.
-- Search and type filters; edges are restricted to those whose endpoints remain visible.
-- Claim selection opens the claim drawer.
-- Fullscreen toggling via the browser Fullscreen API, with a `fullscreenchange` listener to keep the button state current.
-- Memo creation as a custom node type. Memo text is editable; textarea events are prevented from becoming graph drag/scroll gestures. A top-right delete control removes that memo.
-- No React Flow Controls or MiniMap in the current graph UI.
+- Secrets live only in server environment variables.
+- Provider base URLs, API keys, and raw prompts are not exposed through the API.
+- Uploads are size/MIME limited; PDF/text extraction is local.
+- Tavily-supplied URLs are validated as HTTP(S) and excluded if they are local/private addresses before being stored or rendered.
+- Source text is treated as untrusted in prompts; the system prompt tells the model to ignore instructions inside sources.
+- Markdown rendering does not allow raw HTML; external links use `rel="noreferrer"`.
+- Concurrency is capped (`MAX_CONCURRENT_RUNS`); provider timeouts and a small retry policy are configured through the OpenAI client.
+- No authentication is implemented. Bind to loopback (default) or place the server behind an authenticated reverse proxy. Public share tokens are the only intentionally public data.
+- SSE headers disable caching/buffering and include heartbeats; events are replayed from persisted storage.
 
-Graph nodes and memos live in `GraphPage` component state only. They are not serialized into `Session` or localStorage, so moving nodes or adding notes is temporary across navigation/remounts. Graph layout is not produced by an automatic layout engine.
+## 11. Build, deployment, and tests
 
-## 7. Styling and responsive layout
+- `npm run dev` — Vite plus `tsx watch` API, with `/api` proxied to port 8787.
+- `npm run build` — web `tsc -b`/Vite build and server `tsc --noEmit`.
+- `npm start` — run the API with static serving of `dist/`.
+- `docker compose up --build` — build both sides, serve from one container, persist `data/` in a volume.
+- `npm test` — web model tests plus server integration tests.
 
-`src/styles.css` contains the application theme, component styling, and responsive rules. The design is a dark graphite/monochrome interface with semantic status treatments. Most styles are class based. Breakpoints currently cover wide desktop through narrow mobile layouts. The stylesheet is compact and includes later overrides; CSS changes should be checked against the full cascade and the affected responsive variants.
-
-`index.html` does not import remote font files. CSS font stacks therefore depend on installed fonts and fallbacks; the original design brief's named font choices are not guaranteed at runtime. React Flow base CSS is imported separately by `main.tsx`.
-
-## 8. External boundaries
-
-There are intentionally no adapters for external services. Current user-visible simulation boundaries:
-
-- Model selection affects fixture metadata and estimated demo usage only.
-- A research run advances with browser timers and local data.
-- Evidence verification is represented by preference and static claim status.
-- Usage history summarizes local session records.
-- Capacity is a local demo number.
-- The attachment button is only a UI affordance.
-
-Adding any live provider or search integration would change the security, privacy, error-handling, and architecture assumptions. It requires an explicit product request and a separate design of credentials, data flow, source provenance, and failure states.
-
-## 9. Build and tests
-
-Project scripts in `package.json`:
-
-- `npm run dev` — Vite development server.
-- `npm run build` — TypeScript build followed by Vite production bundle.
-- `npm run preview` — local preview of the bundle.
-- `npm test` — Vitest once.
-
-`src/data.test.ts` covers three data-level concerns: estimator scaling for deeper/verified research, valid claim-to-source references, and distinct profiles with positive multipliers and harness data. These tests do not exercise browser interactions, routing, React Flow dragging, visual layout, or actual model/search behavior.
+Server tests use fake `LlmGateway` and `SearchProvider` implementations and an in-memory SQLite database. They cover configuration failure, the full pipeline, persistence, graph/share/export, CRUD, preferences, usage, and unavailable routes. They do not call live providers. Browser interaction, streaming under real network conditions, and provider-specific quirks still require a live smoke test with valid credentials.

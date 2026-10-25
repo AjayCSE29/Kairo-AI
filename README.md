@@ -1,38 +1,111 @@
 # Kairo Research Workspace
 
-A frontend-only prototype of Kairo, an evidence-first research and search workspace. The interface uses a graphite and silver visual system and includes research composition, simulated execution, cited synthesis, source inspection, JEV claim review, a knowledge graph, model selection, local research history, relative usage factors, and preferences.
+Kairo is an evidence-first research workspace. It composes a question, runs a real web search, retrieves source excerpts, extracts checkable claims, optionally reviews those claims against their cited evidence (JEV), and streams a cited answer. Results, sources, claims, graph layout, memos, preferences, and usage are stored server-side in SQLite.
+
+The interface keeps the dark graphite, monochrome visual system. Research runs are no longer simulated: they call the model and search providers configured on the server.
 
 ## Requirements
 
 - Node.js 20 or later
 - npm
+- A Tavily API key
+- OpenAI-compatible chat completion endpoints for OpenAI and/or JarvisLabs
+- Build tools for `better-sqlite3` if a prebuilt binary is unavailable
+
+## Configuration
+
+```sh
+cp .env.example .env
+```
+
+Fill in:
+
+- `OPENAI_BASE_URL`, `OPENAI_API_KEY`
+- `JARVISLABS_BASE_URL`, `JARVISLABS_API_KEY`
+- `TAVILY_API_KEY`
+- `MODEL_<PROFILE>_PROVIDER` and `MODEL_<PROFILE>_NAME` for each of the six Kairo profiles
+
+Both model providers are called through the OpenAI-compatible `/v1/chat/completions` shape. The six Kairo profiles are UI presets that route to the real model IDs you configure. Keys stay on the server and are never sent to the browser.
+
+If required values are missing, Kairo shows a setup screen listing the missing variables and does not fall back to mock data.
 
 ## Install and run
 
 ```sh
 npm install
+npm --prefix server install
 npm run dev
 ```
 
-Vite prints the local development URL after startup. Create a production build with:
+- Web: Vite prints the local URL (usually `http://localhost:5173`).
+- API: `http://127.0.0.1:8787`.
+- Vite proxies `/api` to the API during development.
+
+Production build and local run:
 
 ```sh
 npm run build
+npm start
 ```
 
-## Frontend simulation boundary
+`npm start` runs the API server, which serves the built `dist/` app and the API from one origin.
 
-All model profiles, source records, claims, answer text, graph relationships, and usage calculations are local demo fixtures. Submitting a question runs a bounded frontend timer sequence; no external search engine, model provider, backend, account system, or payment processor is called. The source destinations are sample links. JEV statuses describe only the evidence available in the demo and do not represent absolute truth. Research history and preferences are browser-local; do not store credentials or sensitive information in this prototype.
+Docker:
 
-The model profiles describe intended specializations. They are not claims of independently trained models or measured performance. Model multipliers show relative demo usage.
+```sh
+docker compose up --build
+```
+
+The compose stack binds to `127.0.0.1:8787` and persists SQLite and uploads in the `kairo-data` volume.
 
 ## Routes
 
 - `/` — research composer
-- `/research/:sessionId` — results, sources, claims, and graph
+- `/research/:sessionId` — answer, sources, claims, and graph
 - `/library` — searchable local research history
-- `/settings/models` — model profiles and default selection
-- `/settings/usage` — local research usage history
-- `/settings` — local preferences and demo reset
-- `/models`, `/usage`, and `/credits` — legacy routes redirect to their settings pages
+- `/settings` — research defaults, appearance, and data reset
+- `/settings/models` — model profiles and provider routes
+- `/settings/usage` — real token usage and run history
 - `/graph/:sessionId` — graph view
+- `/share/:token` — public, frozen, read-only result snapshot
+- `/models`, `/usage`, `/credits` — legacy redirects to settings
+
+## Research lifecycle
+
+1. The selected model profile plans search queries.
+2. Tavily searches and retrieves source content; results are deduplicated and capped by mode.
+3. Uploaded PDF/text attachments are included as evidence sources.
+4. The model extracts checkable claims tied to source IDs.
+5. When JEV is enabled, a second model pass labels claims `Supported`, `Contradicted`, or `Insufficient evidence` against their cited excerpts.
+6. The model streams a Markdown answer with `[S1]`-style citations.
+7. Sources, claims, answer, token usage, and graph data are persisted; progress is delivered over SSE with replay support.
+
+The effort slider is functional: it changes answer length, token budget, temperature, and query depth. Mode controls search breadth and source count.
+
+## Data and trust boundaries
+
+- Storage: SQLite (`data/kairo.db`) plus uploaded files (`data/uploads`). No account system; this is a single-user workspace.
+- Usage: provider-reported token counts when available, clearly marked estimates when not. There is no credit balance or billing integration.
+- Search: Tavily retrieval only; source contents can be incomplete, outdated, or wrong.
+- JEV: a model-assisted review of the cited excerpts, not a certification of absolute truth or independent validation.
+- Attachments: PDF, text, Markdown, CSV, and JSON are extracted locally; the extracted text is sent to the configured model and search providers as part of a run.
+- Sharing: share links are unguessable tokens pointing to a frozen snapshot. Revoking a link in the result view deletes it.
+- Access: the server assumes loopback/local use. If you expose it beyond your machine, put it behind an authenticated reverse proxy. There is no built-in login.
+
+## Scripts
+
+- `npm run dev` — Vite plus the API server
+- `npm run build` — web typecheck/build plus server typecheck
+- `npm run preview` — preview the Vite build
+- `npm start` — run the production API server
+- `npm test` — web tests plus server tests
+
+Test suites use fake provider and search adapters. They do not make live provider calls.
+
+## Repository map
+
+- `src/` — React app, API client, Markdown/citation rendering, settings, usage
+- `shared/` — model profiles and API/SSE types used by both sides
+- `server/` — Fastify API, SQLite repositories, provider adapters, research pipeline
+- `Dockerfile`, `docker-compose.yml`, `.env.example`
+- `CONTEXT.md`, `ARCHITECTURE.md`, `AGENTS.md` — product, implementation, and contribution guidance
